@@ -1,0 +1,243 @@
+# Voyage Estimation — the whole platform in one compose project.
+#
+#   cp .env.example .env        # fill in generated secrets (never commit .env)
+#   docker compose up -d --build --wait
+#   open http://localhost:8080
+#
+# Services:
+#   edge            nginx, the single browser origin: / → web, /api → api-1/api-2 (no stickiness)
+#   web             frontend (React/Vite static build, unprivileged nginx)
+#   api-1, api-2    stateless Go API replicas (REST + calculation WebSocket)
+#   worker          RabbitMQ → PostgreSQL persistence worker (idempotent)
+#   migrate         one-shot schema migration + admin seed; APIs start after it succeeds
+#   postgres        durable source of truth (PostGIS)
+#   redis           sessions, leases, tickets, cache (never "saved")
+#   rabbitmq        durable persistence events (management UI on 127.0.0.1:15672)
+#   otel-collector  + jaeger   traces/metrics (Jaeger UI on 127.0.0.1:16686)
+#
+# Published ports bind to 127.0.0.1 only. Secrets come from .env at runtime;
+# none is baked into any image. See README.md and ../voyage-backend/docs/DEPLOYMENT.md.
+name: voyage-platform
+
+x-app-env: &app-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: postgres
+  DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+  DB_NAME: mcs_db
+  DB_SSL_MODE: disable
+  DB_MAX_OPEN_CONNS: "25"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  RABBITMQ_URL: amqp://lookup:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}@rabbitmq:5672/
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+  MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY}
+  # Must be the URL users open (the edge), or the calculation WebSocket is refused.
+  WS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
+  LOG_FORMAT: json
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_TRACES_SAMPLER_ARG: "1"
+  METRICS_ADDR: 0.0.0.0:9464
+  SHUTDOWN_DRAIN_DELAY: 5s
+  SHUTDOWN_TIMEOUT: 20s
+  # Calculation authority stage served to the browser (M10): local | server_display | server_only.
+  # Rollback = local + restart the APIs; open pages switch on their next load.
+  CALC_AUTHORITY: ${CALC_AUTHORITY:-local}
+  # Optional third-party integrations (features using them are unavailable when empty).
+  EXCHANGERATE_API_KEY: ${EXCHANGERATE_API_KEY:-}
+  FLEETGO_API_KEY: ${FLEETGO_API_KEY:-}
+  FLEETGO_BASE_URL: ${FLEETGO_BASE_URL:-}
+  SEAROUTE_SERVICE_URL: ${SEAROUTE_SERVICE_URL:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
+  SMTP_FROM_NAME: ${SMTP_FROM_NAME:-}
+
+x-api: &api
+  image: voyage-api:local
+  environment:
+    <<: *app-env
+    SERVER_PORT: "8080"
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    otel-collector:
+      condition: service_healthy
+  healthcheck:
+    # Readiness: PostgreSQL, migrations, Redis, RabbitMQ, WebSocket.
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
+    interval: 5s
+    timeout: 3s
+    start_period: 30s
+    retries: 5
+  # Drain delay (5 s) + shutdown timeout (20 s) + margin.
+  stop_grace_period: 35s
+  restart: unless-stopped
+
+services:
+  # ---------- data ----------
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: mcs_db
+    # max_connections >= (2 API + 1 worker) x DB_MAX_OPEN_CONNS (25) + headroom.
+    command: ["postgres", "-c", "max_connections=150"]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d mcs_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Sessions, leases and tickets must never be evicted; AOF keeps session recovery across restarts.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: lookup
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD}
+    ports: ["127.0.0.1:15672:15672"] # management UI
+    volumes: [rabbitmq_data:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      start_period: 60s
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    restart: unless-stopped
+
+  # ---------- observability ----------
+  otel-collector:
+    build: ../voyage-backend/deploy/otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["../voyage-backend/deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["127.0.0.1:8889:8889"] # Prometheus metrics
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.0.0
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    volumes: ["../voyage-backend/deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro"]
+    ports: ["127.0.0.1:16686:16686"] # trace UI
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:16686/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- backend ----------
+  migrate:
+    image: voyage-api:local
+    build:
+      context: ../voyage-backend
+      target: api
+    command: ["-migrate"]
+    environment:
+      <<: *app-env
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api-1: *api
+  api-2: *api
+
+  worker:
+    image: voyage-worker:local
+    build:
+      context: ../voyage-backend
+      target: worker
+    environment:
+      <<: *app-env
+      WORKER_HEALTH_ADDR: 0.0.0.0:8081
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    stop_grace_period: 35s
+    restart: unless-stopped
+
+  # ---------- frontend ----------
+  web:
+    image: voyage-web:local
+    build:
+      context: ../voyage-frontend
+      args:
+        # PUBLIC build-time values only — they end up in the JavaScript bundle.
+        VITE_MARINE_API_BASE: /api/v1
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-}
+        VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY:-}
+        VITE_LOVABLE_CONNECTOR_MAPBOX_PUBLIC_TOKEN: ${VITE_LOVABLE_CONNECTOR_MAPBOX_PUBLIC_TOKEN:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- edge ----------
+  edge:
+    image: nginx:1.27.5-alpine
+    volumes: ["./deploy/edge/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["127.0.0.1:${EDGE_PORT:-8080}:8080"]
+    depends_on:
+      web:
+        condition: service_healthy
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/edge-healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
+  rabbitmq_data:
