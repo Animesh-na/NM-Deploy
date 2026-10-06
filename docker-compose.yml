@@ -16,7 +16,7 @@
 #   otel-collector  + jaeger   traces/metrics (Jaeger UI on 127.0.0.1:16686)
 #
 # Published ports bind to 127.0.0.1 only. Secrets come from .env at runtime;
-# none is baked into any image. See README.md and ../voyage-backend/docs/DEPLOYMENT.md.
+# none is baked into any image. See README.md and ../NM-backend/docs/DEPLOYMENT.md.
 name: voyage-platform
 
 x-app-env: &app-env
@@ -127,9 +127,9 @@ services:
 
   # ---------- observability ----------
   otel-collector:
-    build: ../voyage-backend/deploy/otel-collector
+    build: ../NM-backend/deploy/otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
-    volumes: ["../voyage-backend/deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
+    volumes: ["../NM-backend/deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
     ports: ["127.0.0.1:8889:8889"] # Prometheus metrics
     depends_on:
       jaeger:
@@ -144,7 +144,7 @@ services:
   jaeger:
     image: jaegertracing/jaeger:2.0.0
     command: ["--config", "/etc/jaeger/config.yaml"]
-    volumes: ["../voyage-backend/deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro"]
+    volumes: ["../NM-backend/deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro"]
     ports: ["127.0.0.1:16686:16686"] # trace UI
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:16686/ || exit 1"]
@@ -157,7 +157,7 @@ services:
   migrate:
     image: voyage-api:local
     build:
-      context: ../voyage-backend
+      context: ../NM-backend
       target: api
     command: ["-migrate"]
     environment:
@@ -177,7 +177,7 @@ services:
   worker:
     image: voyage-worker:local
     build:
-      context: ../voyage-backend
+      context: ../NM-backend
       target: worker
     environment:
       <<: *app-env
@@ -204,7 +204,7 @@ services:
   web:
     image: voyage-web:local
     build:
-      context: ../voyage-frontend
+      context: ../NM-frontend
       args:
         # PUBLIC build-time values only — they end up in the JavaScript bundle.
         VITE_MARINE_API_BASE: /api/v1

@@ -1,20 +1,20 @@
 # Voyage Platform — rules for changes
 
-Maritime voyage-estimation platform. Three repositories, cloned side by side: `voyage-backend`, `voyage-frontend` and this `voyage-deploy`. Server-authoritative calculation was introduced in migration milestones M0–M10
+Maritime voyage-estimation platform. Three repositories, cloned side by side: `NM-backend`, `NM-frontend` and this `NM-Deploy`. Server-authoritative calculation was introduced in migration milestones M0–M10
 (complete). Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
 History and decisions:
 
-- `../voyage-backend/docs/migration/PROGRESS.md`
-- `../voyage-backend/docs/migration/DECISIONS.md` (D-nnn)
-- `../voyage-backend/docs/migration/DISCREPANCIES.md` (X-nnn)
+- `../NM-backend/docs/migration/PROGRESS.md`
+- `../NM-backend/docs/migration/DECISIONS.md` (D-nnn)
+- `../NM-backend/docs/migration/DISCREPANCIES.md` (X-nnn)
 
 ## Layout
 
-- `../voyage-backend` is the Go/Gin API and persistence worker (one module, two processes; a modular monolith). It contains
+- `../NM-backend` is the Go/Gin API and persistence worker (one module, two processes; a modular monolith). It contains
   the authoritative calculation engine `internal/voyagecalc`.
-- `../voyage-frontend` is the React/Vite app. It still contains the browser calculation, used as a fallback and for
+- `../NM-frontend` is the React/Vite app. It still contains the browser calculation, used as a fallback and for
   comparison. Stage 5, its removal per domain, is deferred (D-058).
-- `voyage-deploy` (here) holds docker-compose, the edge proxy, `.env.example` and ARCHITECTURE.md.
+- `NM-Deploy` (here) holds docker-compose, the edge proxy, `.env.example` and ARCHITECTURE.md.
 
 Treat the code as the source of truth. Never assume a feature exists until you've found it.
 
@@ -72,11 +72,11 @@ Stop and ask the user when a decision would change any of these:
 ## Commands
 
 ```text
-# Whole stack (voyage-deploy)
+# Whole stack (NM-Deploy)
 up:         cp .env.example .env (fill secrets) ; docker compose up -d --build --wait   → http://localhost:8080
-smoke:      (../voyage-backend) SMOKE_EMAIL=… SMOKE_PASSWORD=… go run ./cmd/smoke -base http://127.0.0.1:8080
+smoke:      (../NM-backend) SMOKE_EMAIL=… SMOKE_PASSWORD=… go run ./cmd/smoke -base http://127.0.0.1:8080
 
-# Backend (../voyage-backend) — go 1.24
+# Backend (../NM-backend) — go 1.24
 fmt:        gofmt -l <files you touched>
 vet/test:   go vet ./... ; go test ./...
 build:      go build ./...
@@ -90,23 +90,23 @@ integr.:    TEST_REDIS_ADDR=127.0.0.1:56379 TEST_AMQP_URL=amqp://guest:guest@127
             TEST_DATABASE_URL=postgres://postgres:m3test@127.0.0.1:55432/m3?sslmode=disable \
             go test -tags integration -count=1 ./internal/repository ./internal/session/... ./internal/realtime ./internal/persist
 ws-order:   (container) go test -race -count=100 -run TestOutOfOrderCompletionOnlyLatestResultEmitted ./internal/realtime
-ws proto:   UPDATE_WS_PROTOCOL=1 go test ./internal/realtime, then copy internal/realtime/protocol.generated.ts to ../voyage-frontend/src/contracts/ws/
+ws proto:   UPDATE_WS_PROTOCOL=1 go test ./internal/realtime, then copy internal/realtime/protocol.generated.ts to ../NM-frontend/src/contracts/ws/
 allowlist:  UPDATE_PATCH_ALLOWLIST=1 go test ./internal/voyagecalc/contract -run TestPatchAllowlist   # review the diff
 bench:      go test -run XXX -bench 'BenchmarkGolden|BenchmarkHugeVoyage' ./internal/voyagecalc/contract
 docs:       node scripts/docs/check-docs.mjs
 
-# Parity (../voyage-backend) — frontend defaults to ../voyage-frontend (FRONTEND_DIR overrides)
+# Parity (../NM-backend) — frontend defaults to ../NM-frontend (FRONTEND_DIR overrides)
 parity:     bash scripts/golden/parity.sh            # schema sync + TS types + go test -tags parity (88/88)
 parity+:    bash scripts/golden/parity.sh --update   # also regenerates frontend expected outputs
 scenarios:  node scripts/golden/derive-scenarios.mjs # rebuild golden inputs + manifest (then parity --update)
 
-# Frontend (../voyage-frontend) — Node 24, npm 11
+# Frontend (../NM-frontend) — Node 24, npm 11
 install:    npm ci
 lint:       npm run lint                          # 30 known pre-existing errors; introduce no new ones
 typecheck:  npx tsc --noEmit -p tsconfig.app.json
 test:       npm test                              # known baseline failures: live-API vessel fuel + weather routing files
 build:      npm run build ; npm run check:bundle  # bundle secret scan
 contract:   npm run contract:gen | contract:check
-golden:     TZ=UTC npm run golden:update          # writes ../voyage-backend/internal/voyagecalc/testdata/golden/**/*.expected.json
+golden:     TZ=UTC npm run golden:update          # writes ../NM-backend/internal/voyagecalc/testdata/golden/**/*.expected.json
 dev:        (PowerShell) $env:VITE_SERVER_CALCULATION='true'; $env:VITE_MARINE_API_BASE='/api/v1'; $env:DEV_API_PROXY='http://localhost:8090'; npx vite --port 8080
 ```

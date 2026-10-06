@@ -1,7 +1,7 @@
 # Production deployment target
 
 Not chosen yet. The production topology is an open decision (see
-[backend/docs/DEPLOYMENT.md](../../../voyage-backend/docs/DEPLOYMENT.md#open-questions)).
+[backend/docs/DEPLOYMENT.md](../../../NM-backend/docs/DEPLOYMENT.md#open-questions)).
 
 Options and what would go in this folder:
 

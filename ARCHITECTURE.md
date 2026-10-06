@@ -1,12 +1,12 @@
 # Voyage Platform — Architecture
 
-This document describes how the platform (voyage-backend and voyage-frontend, run by this voyage-deploy repo) works end to end, as implemented: components, the main
+This document describes how the platform (NM-backend and NM-frontend, run by this NM-Deploy repo) works end to end, as implemented: components, the main
 flows (with diagrams), the data model, timings and limits, edge cases and how each is handled, security,
 observability, and the known limitations.
 
 Diagrams are Mermaid; they render on GitHub, GitLab and in VS Code (Markdown preview with Mermaid support).
-Decision numbers (D-nnn) refer to [voyage-backend/docs/migration/DECISIONS.md](../voyage-backend/docs/migration/DECISIONS.md).
-Deeper per-topic docs live in [voyage-backend/docs/](../voyage-backend/docs/).
+Decision numbers (D-nnn) refer to [NM-backend/docs/migration/DECISIONS.md](../NM-backend/docs/migration/DECISIONS.md).
+Deeper per-topic docs live in [NM-backend/docs/](../NM-backend/docs/).
 
 Contents
 
@@ -56,8 +56,8 @@ flowchart LR
   A1 & A2 & WK -- "OTLP traces/metrics" --> OT --> JG
 ```
 
-**One codebase, two processes** (modular monolith, D-039): the Go module in `voyage-backend` builds an **API** image and a
-**worker** image. The **frontend** in `voyage-frontend` is a static build. The **edge** gives the browser one origin, so there
+**One codebase, two processes** (modular monolith, D-039): the Go module in `NM-backend` builds an **API** image and a
+**worker** image. The **frontend** in `NM-frontend` is a static build. The **edge** gives the browser one origin, so there
 is no CORS and the WebSocket origin check is simple.
 
 | Service | Scales | State | Purpose |
@@ -78,7 +78,7 @@ is no CORS and the WebSocket origin check is simple.
 | Concern | Owner | Never |
 |---|---|---|
 | "Saved" | **PostgreSQL commit** | A Redis update or a queued message is never "saved" |
-| Authoritative calculation | **Go engine** (`voyage-backend/internal/voyagecalc`) in server stages | Two competing engines; the browser engine is a fallback/comparison only |
+| Authoritative calculation | **Go engine** (`NM-backend/internal/voyagecalc`) in server stages | Two competing engines; the browser engine is a fallback/comparison only |
 | Working (unsaved) edits | Browser + Redis session record | — |
 | Who may edit a sheet | Redis **lease** with a strictly increasing **fencing token**, also checked by PostgreSQL | Sticky sessions as a consistency mechanism |
 | Concurrent writes | Optimistic versioning `UPDATE … SET version = version + 1 WHERE id = $1 AND version = $2` | Last-writer-wins |
@@ -316,7 +316,7 @@ erDiagram
 - **Segments never mix**: separate tables for dry bulk and tanker sheets and workbooks.
 - **`vessel_name`, `vessel_imo`, `vessel_dwt`** are STORED generated columns (migration `0005`): PostgreSQL derives
   them from `data.vessel` on every write; they cannot drift and can never make a save fail. For analytics only
-  (examples in [voyage-backend/DATABASE_SCHEMA.md](../voyage-backend/DATABASE_SCHEMA.md)).
+  (examples in [NM-backend/DATABASE_SCHEMA.md](../NM-backend/DATABASE_SCHEMA.md)).
 - **Indexes for lists**: `(user_id, status, created_at)` and `(workbook_id, status, created_at)`.
 - **`calculation_snapshots`** is both the calculation history and the **save idempotency ledger** (one row per save;
   at most one `COMPLETED` per sheet, enforced by a partial unique index). Rows must not be deleted.
@@ -347,7 +347,7 @@ erDiagram
 ## 7. Edge cases
 
 Every row is covered by automated tests; the full list with test names is in
-[voyage-backend/docs/migration/FAILURE_MATRIX.md](../voyage-backend/docs/migration/FAILURE_MATRIX.md).
+[NM-backend/docs/migration/FAILURE_MATRIX.md](../NM-backend/docs/migration/FAILURE_MATRIX.md).
 
 ### 7.1 Connection and browser
 
@@ -442,23 +442,23 @@ Every row is covered by automated tests; the full list with test names is in
 - **Health**: `/healthz` (liveness), `/readyz` (PostgreSQL, migrations, Redis, RabbitMQ, WebSocket; 503 while
   draining); worker on `:8081`.
 
-Details: [voyage-backend/docs/migration/OBSERVABILITY.md](../voyage-backend/docs/migration/OBSERVABILITY.md).
+Details: [NM-backend/docs/migration/OBSERVABILITY.md](../NM-backend/docs/migration/OBSERVABILITY.md).
 
 ---
 
 ## 10. Deployment and operations
 
-| Task | Command (in voyage-deploy) |
+| Task | Command (in NM-Deploy) |
 |---|---|
 | Start / update | `docker compose up -d --build --wait` |
 | Status | `docker compose ps` |
 | Logs | `docker compose logs -f api-1` |
 | Change stage / rollback | edit `CALC_AUTHORITY` in `.env`, then `docker compose up -d` |
-| End-to-end check | `cd ../voyage-backend && SMOKE_EMAIL=… SMOKE_PASSWORD=… go run ./cmd/smoke -base http://127.0.0.1:8080` |
+| End-to-end check | `cd ../NM-backend && SMOKE_EMAIL=… SMOKE_PASSWORD=… go run ./cmd/smoke -base http://127.0.0.1:8080` |
 | Stop (keep data) | `docker compose down` |
 | Roll back the last DB migration | `docker compose run --rm migrate -migrate-down 1` |
 
-Full settings reference: [voyage-backend/docs/DEPLOYMENT.md](../voyage-backend/docs/DEPLOYMENT.md). Getting started: [README.md](README.md).
+Full settings reference: [NM-backend/docs/DEPLOYMENT.md](../NM-backend/docs/DEPLOYMENT.md). Getting started: [README.md](README.md).
 
 ---
 
@@ -474,4 +474,4 @@ Full settings reference: [voyage-backend/docs/DEPLOYMENT.md](../voyage-backend/d
 | Sea-route distance service (`SEAROUTE_SERVICE_URL`) | External, not part of this stack |
 | Redis pub/sub | One subscription per WebSocket for save outcomes (D-042) |
 | Browser end-to-end tests | Not automated; Go smoke test drives the real protocol |
-| `voyage-backend/docs/ARCHITECTURE.md` "Not implemented" section | Predates M10 (says server results are not displayed); this document reflects M10 |
+| `NM-backend/docs/ARCHITECTURE.md` "Not implemented" section | Predates M10 (says server results are not displayed); this document reflects M10 |
