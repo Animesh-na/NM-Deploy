@@ -13,7 +13,10 @@
 #   postgres        durable source of truth (PostGIS)
 #   redis           sessions, leases, tickets, cache (never "saved")
 #   rabbitmq        durable persistence events (management UI on 127.0.0.1:15672)
-#   otel-collector  + jaeger   traces/metrics (Jaeger UI on 127.0.0.1:16686)
+#   otel-collector  receives OTLP traces + metrics from api/worker
+#   tempo           traces            prometheus   metrics (scrapes the collector)
+#   loki            logs              alloy        ships container logs to Loki
+#   grafana         dashboards + Explore for all three: http://127.0.0.1:3000
 #
 # Published ports bind to 127.0.0.1 only. Secrets come from .env at runtime;
 # none is baked into any image. See README.md and ../NM-backend/docs/DEPLOYMENT.md.
@@ -37,7 +40,6 @@ x-app-env: &app-env
   LOG_FORMAT: json
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
   OTEL_TRACES_SAMPLER_ARG: "1"
-  METRICS_ADDR: 0.0.0.0:9464
   SHUTDOWN_DRAIN_DELAY: 5s
   SHUTDOWN_TIMEOUT: 20s
   # Calculation authority stage served to the browser (M10): local | server_display | server_only.
@@ -129,10 +131,9 @@ services:
   otel-collector:
     build: ../NM-backend/deploy/otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
-    volumes: ["../NM-backend/deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
-    ports: ["127.0.0.1:8889:8889"] # Prometheus metrics
+    volumes: ["./deploy/observability/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
     depends_on:
-      jaeger:
+      tempo:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/"]
@@ -141,16 +142,98 @@ services:
       retries: 10
     restart: unless-stopped
 
-  jaeger:
-    image: jaegertracing/jaeger:2.0.0
-    command: ["--config", "/etc/jaeger/config.yaml"]
-    volumes: ["../NM-backend/deploy/jaeger/config.yaml:/etc/jaeger/config.yaml:ro"]
-    ports: ["127.0.0.1:16686:16686"] # trace UI
+  tempo:
+    image: grafana/tempo:2.8.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: "0"   # writes to the named volume
+    volumes:
+      - ./deploy/observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:16686/ || exit 1"]
+      # The image has busybox under /busybox only (no /bin/sh for CMD-SHELL).
+      test: ["CMD", "/busybox/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3200/ready"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      start_period: 60s
+      retries: 12
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-remote-write-receiver   # Tempo span metrics / service graph
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.1
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./deploy/observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3100/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 12
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.9.2
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./deploy/observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only Docker API access to discover containers and read their logs.
+      # Production: use your platform's log agent instead (see deploy/production).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      disable: true   # image has no wget/curl; nothing depends on it
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceToMetrics
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 12
     restart: unless-stopped
 
   # ---------- backend ----------
@@ -171,8 +254,18 @@ services:
       disable: true
     restart: "no"
 
-  api-1: *api
-  api-2: *api
+  api-1:
+    <<: *api
+    environment:
+      <<: *app-env
+      SERVER_PORT: "8080"
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=api-1
+  api-2:
+    <<: *api
+    environment:
+      <<: *app-env
+      SERVER_PORT: "8080"
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=api-2
 
   worker:
     image: voyage-worker:local
@@ -182,6 +275,7 @@ services:
     environment:
       <<: *app-env
       WORKER_HEALTH_ADDR: 0.0.0.0:8081
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=worker
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -241,3 +335,7 @@ volumes:
   pg_data:
   redis_data:
   rabbitmq_data:
+  tempo_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:

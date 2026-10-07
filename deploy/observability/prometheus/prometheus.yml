@@ -1,0 +1,31 @@
+# Prometheus: scrapes application metrics from the OpenTelemetry collector
+# and the observability components themselves. Tempo's metrics generator
+# remote-writes span metrics and the service graph here
+# (--web.enable-remote-write-receiver).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: otel-collector
+    # Application metrics: keep job/instance from the collector (service.name /
+    # service.instance.id), not the scrape target's.
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]

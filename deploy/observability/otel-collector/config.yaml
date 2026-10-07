@@ -1,0 +1,56 @@
+# OpenTelemetry collector: API and worker export OTLP/HTTP here
+# (OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318).
+#   traces  → Tempo (OTLP gRPC)
+#   metrics → Prometheus exporter on :8889, scraped by Prometheus
+# Logs are not sent over OTLP: the services write JSON to stdout and Alloy
+# ships container logs to Loki (see ../alloy/config.alloy).
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+  batch: {}
+  # Background Redis calls with no parent span (readiness pings, lease renewals,
+  # index cleanup) arrive every few seconds as one-span traces and would bury
+  # the request traces. Successful ones are dropped; failed ones are kept.
+  # Redis calls inside requests have a parent and are unaffected. Redis latency
+  # stays in the redis_latency metric.
+  filter/background-redis:
+    error_mode: ignore
+    traces:
+      span:
+        - IsRootSpan() and IsMatch(name, "^redis ") and status.code != STATUS_CODE_ERROR
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # job = service.name, instance = service.instance.id (set per container
+    # through OTEL_RESOURCE_ATTRIBUTES, so the two API replicas don't collide).
+    enable_open_metrics: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/background-redis, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

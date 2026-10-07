@@ -48,6 +48,7 @@ Fill in the required secrets in `.env`:
 - `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`
 - `MFA_ENCRYPTION_KEY`: 64 hex characters, e.g. `openssl rand -hex 32`
 - `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account
+- `GRAFANA_ADMIN_PASSWORD`: password of the Grafana `admin` user
 
 `.env` is gitignored. Never commit it.
 
@@ -57,8 +58,16 @@ Fill in the required secrets in `.env`:
 docker compose up -d --build --wait
 ```
 
-Open http://localhost:8080 and sign in with the admin account. Jaeger: http://localhost:16686, RabbitMQ:
-http://localhost:15672.
+Open http://localhost:8080 and sign in with the admin account.
+
+| Tool (localhost only) | URL |
+|---|---|
+| **Grafana**: dashboards, logs, traces, metrics (user `admin`, password `GRAFANA_ADMIN_PASSWORD`) | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| RabbitMQ management | http://localhost:15672 |
+
+In Grafana, open **Dashboards → Voyage Platform → Voyage Platform — Overview**, or **Explore** for ad-hoc queries.
+How logs, metrics and traces are collected and linked: [ARCHITECTURE.md §9](ARCHITECTURE.md#9-observability).
 
 | Task | Command (in NM-Deploy) |
 |---|---|

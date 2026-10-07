@@ -41,7 +41,7 @@ flowchart LR
     RD[("Redis<br/>sessions, leases,<br/>tickets, outcomes")]
     MQ[("RabbitMQ<br/>save queue")]
     OT["otel-collector"]
-    JG["Jaeger UI"]
+    OBS["Prometheus · Loki · Tempo<br/>Alloy → Grafana"]
   end
 
   E -- "/" --> WEB
@@ -53,7 +53,8 @@ flowchart LR
   WK -- "save outcome event" --> RD
   A1 & A2 -- "reads, REST saves,<br/>fence claims" --> PG
   MG -- "schema migrations,<br/>admin seed" --> PG
-  A1 & A2 & WK -- "OTLP traces/metrics" --> OT --> JG
+  A1 & A2 & WK -- "OTLP traces/metrics" --> OT --> OBS
+  A1 & A2 & WK -. "stdout JSON logs" .-> OBS
 ```
 
 **One codebase, two processes** (modular monolith, D-039): the Go module in `NM-backend` builds an **API** image and a
@@ -70,6 +71,10 @@ is no CORS and the WebSocket origin check is simple.
 | `postgres` | 1 | **durable** | Sheets, workbooks, users, orgs, calculation snapshots |
 | `redis` | 1 (single shard, D-031) | ephemeral | Sessions, leases, fence counters, tickets, rate limits, save outcomes |
 | `rabbitmq` | 1 | durable queue | Save messages only (never UI traffic) |
+| `otel-collector` | 1 | none | Receives OTLP traces + metrics; traces → Tempo, metrics → Prometheus |
+| `prometheus`, `loki`, `tempo` | 1 each | telemetry (15 d / 7 d / 7 d) | Metrics, logs and traces storage |
+| `alloy` | 1 | none | Ships every container's logs to Loki |
+| `grafana` | 1 | dashboards (provisioned) | One UI for metrics, logs and traces |
 
 ---
 
@@ -433,16 +438,114 @@ Every row is covered by automated tests; the full list with test names is in
 
 ## 9. Observability
 
-- **Traces**: one trace from the browser's `traceparent` through API, engine, RabbitMQ and worker to the PostgreSQL
-  commit. View in Jaeger at http://localhost:16686.
-- **Metrics** (Prometheus format via the collector, http://localhost:8889/metrics): `calculation_duration{outcome}`,
-  `calculation_errors{code}`, `lease_conflicts{reason}`, `version_conflicts{source}`, `save_failures{code}`,
-  `rabbitmq_publish_failures`, `worker_failures{kind}`, WebSocket gauges.
-- **Logs**: JSON, trace-correlated, without sheet data.
-- **Health**: `/healthz` (liveness), `/readyz` (PostgreSQL, migrations, Redis, RabbitMQ, WebSocket; 503 while
-  draining); worker on `:8081`.
+Grafana is the single place to look: **metrics** in Prometheus, **logs** in Loki, **traces** in Tempo, linked to
+each other. Everything is provisioned from `deploy/observability/`, so a fresh `docker compose up` comes with the data
+sources and the dashboard ready.
 
-Details: [NM-backend/docs/migration/OBSERVABILITY.md](../NM-backend/docs/migration/OBSERVABILITY.md).
+```mermaid
+flowchart LR
+  subgraph app["Application containers"]
+    A["api-1 · api-2"]
+    W["worker"]
+    O["edge · web · postgres ·<br/>redis · rabbitmq · …"]
+  end
+  A & W -- "OTLP/HTTP<br/>traces + metrics" --> C["otel-collector"]
+  C -- "traces (OTLP)" --> T[("Tempo")]
+  C -- ":8889 /metrics" --> PR[("Prometheus")]
+  T -- "span metrics,<br/>service graph<br/>(remote write)" --> PR
+  A & W & O -- "stdout / stderr" --> D["Docker"]
+  D -- "docker socket (read-only)" --> AL["Alloy"]
+  AL -- "logs + trace_id metadata" --> LK[("Loki")]
+  PR & LK & T --> G["Grafana<br/>localhost:3000"]
+```
+
+### Signals
+
+| Signal | Source | Pipeline | Retention | Where to look |
+|---|---|---|---|---|
+| **Metrics** | App metrics via OTel SDK (OTLP); HTTP metrics from `otelgin` | collector → Prometheus scrape (`job` = service, `instance` = `api-1`/`api-2`/`worker`) | 15 days | Dashboard, Explore → Prometheus |
+| **Traces** | App spans (HTTP, WebSocket, calculation graph, Redis, RabbitMQ, worker, PostgreSQL) | collector → Tempo | 7 days | Dashboard "Traces" row, Explore → Tempo (TraceQL) |
+| **Trace-derived metrics** | Tempo metrics generator | Tempo → Prometheus (`traces_spanmetrics_*`, `traces_service_graph_*`) | 15 days | Service graph, RED per span |
+| **Logs** | stdout/stderr of every container in the project | Alloy → Loki, labels `service`, `container`, `level`; `trace_id`, `span_id` as structured metadata | 7 days | Dashboard "Logs" row, Explore → Loki |
+
+Application metrics (all durations in ms; ids never become labels):
+
+| Area | Metrics (Prometheus names) |
+|---|---|
+| Calculation | `calculation_duration_milliseconds{outcome}`, `calculation_errors_total{code}`, `calculation_superseded_total` |
+| WebSocket / sessions | `websocket_connections`, `active_sessions`, `websocket_reconnects_total`, `websocket_message_duration_milliseconds{type}` |
+| Saves / conflicts | `save_end_to_end_latency_milliseconds{status}`, `save_failures_total{code}`, `version_conflicts_total{source}`, `lease_conflicts_total{reason}` |
+| Persistence | `worker_processing_duration_milliseconds{outcome}`, `worker_failures_total{kind}`, `rabbitmq_publish_latency_milliseconds`, `rabbitmq_publish_failures_total`, `postgres_save_latency_milliseconds{path}`, `redis_latency_milliseconds{command}` |
+| HTTP | `http_server_request_duration_seconds{http_route, http_response_status_code}` |
+
+Counters appear in Prometheus only after they first increase (for example `save_failures_total` after the first
+failed save). The dashboard panels show "No data" until then.
+
+### Dashboard: Voyage Platform — Overview
+
+Rows:
+
+1. **Overview:** calculations per second, calculation p95, open WebSockets, active sessions, save failures and error
+   logs in the last hour.
+2. **Calculation:** rate by outcome, latency p50/p95/p99, errors by code, superseded results.
+3. **WebSocket and sessions:** per-instance connections and sessions, message p95 by type, reconnects.
+4. **Saves and conflicts:** save end-to-end p95, failures by code, version and lease conflicts.
+5. **Persistence:** worker processing and failures, RabbitMQ publish latency and failures, PostgreSQL and Redis p95.
+6. **HTTP API:** requests by route and status, p95 by route.
+7. **Traces:** service graph, recent error traces, traces slower than 500 ms.
+8. **Logs:** volume by service, warnings and errors by service, and a searchable log stream.
+
+Variables: `instance` (metrics), `service`, `level` and a free-text `search` (logs).
+
+The JSON is generated by `deploy/observability/grafana/gen-dashboard.cjs`. Edit the script and regenerate; edits
+saved in the UI are not kept (`allowUiUpdates: false`).
+
+### Correlation
+
+- **Log → trace:** open a log line, then **View trace**. Loki's `trace_id` metadata links to Tempo.
+- **Trace → logs:** in a trace, **Logs for this span/trace** runs `{service=~".+"} | trace_id="<id>"` in Loki. One
+  save shows the API's and the worker's lines together.
+- **Trace → metrics:** request rate and p95 from span metrics for the span's service and name.
+- **Service graph:** built from traces: user → `lookup-api` → `lookup-worker`, plus Redis and PostgreSQL edges.
+
+Useful queries:
+
+```text
+LogQL    {service=~"api-.*", level="error"}
+LogQL    {service="worker"} | json | msg=~".*retry.*"
+TraceQL  { name = "ws.save" } && { name = "postgres sheet save" }
+TraceQL  { status = error }
+PromQL   histogram_quantile(0.95, sum by (le) (rate(calculation_duration_milliseconds_bucket[5m])))
+PromQL   sum by (code) (increase(save_failures_total[1h]))
+```
+
+### Noise control and safety
+
+- **Background Redis spans are dropped.** These are spans with no parent from readiness pings, lease renewals every
+  5 s and index cleanup; they used to make up about two-thirds of all traces. Failed ones are kept, and calls inside requests
+  are unaffected. The rule is the `filter/background-redis` processor in the collector config.
+- **No sheet contents** reach any signal: span attributes, metric labels and log lines carry identifiers, codes and
+  versions only (enforced by backend tests, see the OBSERVABILITY doc below).
+- **Every UI port binds to `127.0.0.1`.** Grafana needs a login (`GRAFANA_ADMIN_PASSWORD`), with sign-up and
+  anonymous access off. Loki, Tempo and the collector are not published.
+- **Alloy reads the Docker socket read-only** to discover containers. That is fine on a developer or single host. In
+  production, use the platform's log agent instead ([deploy/production](deploy/production/README.md)).
+- **Health:** `/healthz` (liveness) and `/readyz` (PostgreSQL, migrations, Redis, RabbitMQ, WebSocket; 503 while
+  draining); the worker serves these on `:8081`.
+
+Configuration files:
+
+| File | Purpose |
+|---|---|
+| `deploy/observability/otel-collector/config.yaml` | OTLP in; traces → Tempo; metrics → `:8889`; background-Redis filter |
+| `deploy/observability/prometheus/prometheus.yml` | Scrape jobs (collector with `honor_labels`, and every observability component) |
+| `deploy/observability/tempo/tempo.yaml` | Single binary, local storage, 7 d, metrics generator → Prometheus |
+| `deploy/observability/loki/loki.yaml` | Single binary, filesystem, 7 d retention, structured metadata |
+| `deploy/observability/alloy/config.alloy` | Docker discovery for this compose project, JSON level / trace_id extraction |
+| `deploy/observability/grafana/provisioning/` | Data sources (with cross-links) and the dashboard provider |
+
+Backend instrumentation details (span tree, metric definitions, log redaction):
+[NM-backend/docs/migration/OBSERVABILITY.md](../NM-backend/docs/migration/OBSERVABILITY.md).
 
 ---
 
