@@ -1,0 +1,261 @@
+{
+  "uid": "voyage-request-journey",
+  "title": "Voyage — Request journey",
+  "tags": [
+    "voyage"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Voyage dashboards",
+      "type": "dashboards",
+      "tags": [
+        "voyage"
+      ],
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "trace_id",
+        "label": "Trace id",
+        "type": "textbox",
+        "query": "paste-a-trace-id",
+        "current": {
+          "text": "paste-a-trace-id",
+          "value": "paste-a-trace-id"
+        },
+        "options": [
+          {
+            "text": "paste-a-trace-id",
+            "value": "paste-a-trace-id",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "request_id",
+        "label": "Request id (regex)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [],
+      "type": "text",
+      "title": "",
+      "options": {
+        "mode": "markdown",
+        "content": "**Request journey.** Paste a **trace id** (from any log line, the access log below, or Tempo) to see every backend and browser log line of that request, its SQL statements and the full trace. A **request id** (`X-Request-ID` response header) finds the access log line and its trace id."
+      }
+    },
+    {
+      "id": 2,
+      "type": "row",
+      "title": "Recent requests",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "panels": []
+    },
+    {
+      "id": 3,
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{log_type=\"access\"} | json | request_id=~\"$request_id\" | line_format \"{{.status}}  {{.method}} {{.route}}  {{.duration_ms}} ms  user={{.user_id}}  {{.error}}\"",
+          "legendFormat": "",
+          "queryType": "range"
+        }
+      ],
+      "type": "logs",
+      "title": "Access log (newest first) — copy a trace_id from the line details",
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "This trace",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{source=~\"backend|frontend\"} | trace_id=\"$trace_id\"",
+          "legendFormat": "",
+          "queryType": "range"
+        }
+      ],
+      "type": "logs",
+      "title": "All log lines of the trace (backend + browser)",
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 6,
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ trace:id = \"$trace_id\" && span.db.system = \"postgresql\" } | select(span.db.query.text, span.db.sql.table, span.db.rows_affected)",
+          "limit": 1,
+          "tableType": "spans",
+          "spss": 50
+        }
+      ],
+      "type": "table",
+      "title": "SQL statements in the trace",
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "transformations": []
+    },
+    {
+      "id": 7,
+      "gridPos": {
+        "h": 18,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "$trace_id",
+          "limit": 20,
+          "tableType": "traces"
+        }
+      ],
+      "type": "traces",
+      "title": "Trace"
+    }
+  ]
+}

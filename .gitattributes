@@ -1,0 +1,2 @@
+# Config files are mounted into Linux containers: always check out with LF.
+* text=auto eol=lf

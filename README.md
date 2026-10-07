@@ -48,6 +48,7 @@ Fill in the required secrets in `.env`:
 - `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD`, `JWT_SECRET`
 - `MFA_ENCRYPTION_KEY`: 64 hex characters, e.g. `openssl rand -hex 32`
 - `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account
+- `GRAFANA_ADMIN_PASSWORD`: password of the Grafana `admin` user
 
 `.env` is gitignored. Never commit it.
 
@@ -57,8 +58,27 @@ Fill in the required secrets in `.env`:
 docker compose up -d --build --wait
 ```
 
-Open http://localhost:8080 and sign in with the admin account. Jaeger: http://localhost:16686, RabbitMQ:
-http://localhost:15672.
+Open http://localhost:8080 and sign in with the admin account.
+
+| Tool (localhost only) | URL |
+|---|---|
+| **Grafana**: dashboards, logs, traces, metrics (user `admin`, password `GRAFANA_ADMIN_PASSWORD`) | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| RabbitMQ management | http://localhost:15672 |
+
+In Grafana, open **Dashboards → Voyage Platform**:
+
+| Dashboard | Use it to |
+|---|---|
+| Voyage — Overview (metrics) | Watch calculation, WebSocket, save, worker, database and HTTP health |
+| Voyage — Backend logs | Find API/worker errors, failing or slow routes, failed or slow SQL, panics |
+| Voyage — Frontend logs | Find browser errors and the API calls browsers saw fail (each links to its backend trace) |
+| Voyage — User activity | See sign-ins, sheets opened, calculations, saves, admin actions; one user's journey |
+| Voyage — Request journey | Paste a trace id or request id: every log line, SQL statement and span of that request |
+
+**Explore** runs ad-hoc LogQL, PromQL and TraceQL queries. Logs are labelled `source` (backend / frontend /
+infrastructure) and `log_type` (access / activity / db / app / frontend); see [ARCHITECTURE.md §7](ARCHITECTURE.md#7-logging).
+How logs, metrics and traces are collected and linked: [ARCHITECTURE.md §8](ARCHITECTURE.md#8-metrics-traces-and-dashboards).
 
 | Task | Command (in NM-Deploy) |
 |---|---|

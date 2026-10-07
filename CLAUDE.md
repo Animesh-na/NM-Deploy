@@ -61,6 +61,19 @@ Stop and ask the user when a decision would change any of these:
 - `calculation_snapshots` is also the save idempotency ledger: never delete its rows.
 - Sheets stay one row with JSON `data`. Analytics columns are generated from it (D-060).
 
+**Logging and observability** (NM-Deploy ARCHITECTURE.md §5, §7)
+
+- Log with `slog` using the context (`InfoContext`, …), so lines carry the trace id. Every stdout line is JSON.
+  Set `log_type` (`access`, `activity`, `db`, `frontend`; default `app`).
+- A new user-facing REST route gets an entry in `activity.Routes` (NM-backend `internal/activity`). New handlers call
+  services through `h.<svc>.WithContext(dbCtx(c))`, so their SQL joins the request trace. New repositories and
+  services need a `WithContext` method (see the `with_context.go` files).
+- Never log sheet contents, bound SQL values, credentials, tickets or emails. Ids only; the client IP only on
+  authentication events.
+- Metric labels stay low-cardinality (never ids). Loki stream labels stay `source`, `log_type`, `level`,
+  `service`, `container`; everything else goes in the JSON line or structured metadata.
+- Dashboards are generated: edit `deploy/observability/grafana/gen-dashboards.cjs`, not the JSON.
+
 **Security**
 
 - No long-lived JWTs in WebSocket query strings; use the short-lived, single-use tickets.
