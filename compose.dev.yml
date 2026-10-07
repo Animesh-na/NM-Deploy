@@ -1,0 +1,17 @@
+# Development override: publish PostgreSQL, Redis and RabbitMQ on 127.0.0.1
+# so the API or worker can run from source (go run) against them.
+#
+#   docker compose -f docker-compose.yml -f compose.dev.yml up -d postgres redis rabbitmq
+#
+# Then in NM-backend's .env: DB_HOST=127.0.0.1 DB_PORT=15432,
+# REDIS_HOST=127.0.0.1 REDIS_PORT=16379,
+# RABBITMQ_URL=amqp://lookup:<RABBITMQ_PASSWORD>@127.0.0.1:25672/
+# (ports chosen not to clash with local services or the integration-test
+# containers on 55432/56379/55672; RabbitMQ's UI is already on :15672).
+services:
+  postgres:
+    ports: ["127.0.0.1:15432:5432"]
+  redis:
+    ports: ["127.0.0.1:16379:6379"]
+  rabbitmq:
+    ports: ["127.0.0.1:25672:5672"]

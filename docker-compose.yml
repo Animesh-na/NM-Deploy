@@ -129,7 +129,7 @@ services:
 
   # ---------- observability ----------
   otel-collector:
-    build: ../NM-backend/deploy/otel-collector
+    build: ./deploy/observability/otel-collector
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes: ["./deploy/observability/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
     depends_on:
@@ -302,8 +302,6 @@ services:
       args:
         # PUBLIC build-time values only — they end up in the JavaScript bundle.
         VITE_MARINE_API_BASE: /api/v1
-        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-}
-        VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY:-}
         VITE_LOVABLE_CONNECTOR_MAPBOX_PUBLIC_TOKEN: ${VITE_LOVABLE_CONNECTOR_MAPBOX_PUBLIC_TOKEN:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]

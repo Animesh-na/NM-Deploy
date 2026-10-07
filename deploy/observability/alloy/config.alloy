@@ -1,9 +1,19 @@
 // Grafana Alloy: ships the stdout/stderr logs of this compose project's
 // containers to Loki. Reads the Docker API through the read-only socket mount.
 //
-// Labels (low cardinality only): service (compose service name), container,
-// level. trace_id / span_id from the services' JSON logs become structured
-// metadata, so Grafana can jump from a log line to its trace in Tempo.
+// Stream labels (low cardinality only):
+//   source    backend | frontend | infrastructure
+//             backend  = the Go API and worker (api-*, worker, migrate)
+//             frontend = browser logs the API ingested (log_type=frontend)
+//             infrastructure = edge, web, postgres, redis, rabbitmq, observability
+//   log_type  access | activity | db | frontend | app   (backend and frontend only)
+//   level     debug | info | warn | error
+//   service   compose service name; container
+//
+// Structured metadata (indexed for exact lookups, not stream labels):
+//   trace_id, span_id, request_id — Grafana links log lines to Tempo traces.
+// Everything else (event, outcome, user_id, route, status, sql, ...) stays in
+// the JSON line: query it with `| json`.
 
 discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
@@ -35,26 +45,52 @@ loki.source.docker "containers" {
 }
 
 loki.process "app" {
-  // The Go services log JSON (slog): {"time","level","msg",...,"trace_id","span_id"}.
-  // Other containers (nginx, postgres, ...) log plain text; these stages then
-  // simply extract nothing.
-  stage.json {
-    expressions = {
-      level    = "level",
-      trace_id = "trace_id",
-      span_id  = "span_id",
+  // Default: infrastructure. Backend services and their ingested browser logs
+  // are re-labelled below.
+  stage.static_labels {
+    values = { source = "infrastructure" }
+  }
+
+  stage.match {
+    selector = "{service=~\"api-.*|worker|migrate\"}"
+
+    // The Go services log one JSON object per line (slog).
+    stage.json {
+      expressions = {
+        level      = "level",
+        log_type   = "log_type",
+        trace_id   = "trace_id",
+        span_id    = "span_id",
+        request_id = "request_id",
+      }
+    }
+    stage.template {
+      source   = "level"
+      template = "{{ ToLower .Value }}"
+    }
+    stage.template {
+      source   = "log_type"
+      template = "{{ if .Value }}{{ .Value }}{{ else }}app{{ end }}"
+    }
+    stage.labels {
+      values = { level = "", log_type = "" }
+    }
+    stage.static_labels {
+      values = { source = "backend" }
+    }
+    stage.structured_metadata {
+      values = { trace_id = "", span_id = "", request_id = "" }
     }
   }
-  stage.template {
-    source   = "level"
-    template = "{{ ToLower .Value }}"
+
+  // Browser logs travel through the API but are the frontend's.
+  stage.match {
+    selector = "{log_type=\"frontend\"}"
+    stage.static_labels {
+      values = { source = "frontend" }
+    }
   }
-  stage.labels {
-    values = { level = "" }
-  }
-  stage.structured_metadata {
-    values = { trace_id = "", span_id = "" }
-  }
+
   forward_to = [loki.write.default.receiver]
 }
 
