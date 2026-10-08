@@ -7,6 +7,8 @@ const path = require("path");
 const P = { type: "prometheus", uid: "prometheus" };
 const L = { type: "loki", uid: "loki" };
 const T = { type: "tempo", uid: "tempo" };
+// Read-only user directory and audit trail (grafana_reader role).
+const PG = { type: "grafana-postgresql-datasource", uid: "postgres" };
 
 // ── layout helpers ─────────────────────────────────────────────────────
 function board() {
@@ -18,6 +20,7 @@ function board() {
   const target = (t, i) => {
     const ds = t.ds || P;
     const base = { refId: String.fromCharCode(65 + i), datasource: ds };
+    if (ds === PG) return { ...base, rawSql: t.sql, format: "table", rawQuery: true, editorMode: "code" };
     if (ds === T) return { ...base, queryType: t.queryType || "traceql", query: t.query, limit: t.limit || 20, tableType: t.tableType || "traces", ...(t.spss ? { spss: t.spss } : {}) };
     if (ds === L) return { ...base, expr: t.expr, legendFormat: t.legend || "", queryType: t.instant ? "instant" : "range" };
     return { ...base, expr: t.expr, legendFormat: t.legend || "", ...(t.instant ? { instant: true, range: false } : {}) };
@@ -39,8 +42,8 @@ function board() {
       type: "table", title, description: desc,
       options: { showHeader: true, cellHeight: "sm", ...(sortBy ? { sortBy: [{ displayName: sortBy, desc: true }] } : {}) },
       fieldConfig: { defaults: { custom: { align: "auto", cellOptions: { type: "auto" } } }, overrides: [] },
-      transformations: targets[0].ds === T ? [] : [{ id: "reduce", options: { reducers: ["lastNotNull"] } }],
-    }, w, h, targets.map((t) => ({ ...t, instant: t.ds !== T }))),
+      transformations: targets[0].ds === T || targets[0].ds === PG ? [] : [{ id: "reduce", options: { reducers: ["lastNotNull"] } }],
+    }, w, h, targets.map((t) => ({ ...t, instant: t.ds !== T && t.ds !== PG }))),
     logs: (title, expr, { w = 24, h = 14, desc } = {}) => add({
       type: "logs", title, description: desc,
       options: { showTime: true, wrapLogMessage: true, enableLogDetails: true, sortOrder: "Descending", dedupStrategy: "none", prettifyLogMessage: false },
@@ -200,14 +203,36 @@ const out = {};
   b.ts("Unsuccessful outcomes", [{ expr: 'sum by (event, outcome) (increase(user_activity_total{outcome!~"success|mfa_required"}[$__rate_interval]))', legend: "{{event}} {{outcome}}" }], { w: 12, bars: true });
 
   b.row("Who and what");
-  b.table("Most active users (events in range)", [{ ds: L, expr: `topk(20, sum by (user_id) (count_over_time(${act} | user_id!="" [$__range])))` }], { w: 8, sortBy: "Last *" });
+  b.table("Most active users (events in range; pick one above to see their journey)", [{ ds: L, expr: `topk(20, sum by (user_id) (count_over_time(${act} | user_id!="" [$__range])))` }], { w: 8, sortBy: "Last *" });
+  b.table("Failed sign-ins by account (audit trail)", [{ ds: PG, sql:
+    "SELECT COALESCE(u.email, 'unknown email #' || left(a.email_hash, 8)) AS account, a.reason, count(*) AS attempts, max(a.occurred_at) AS last_attempt\n" +
+    "FROM audit_events a LEFT JOIN users u ON u.id = a.target_user_id\n" +
+    "WHERE a.event = 'auth.signin' AND a.outcome IN ('denied', 'failure') AND $__timeFilter(a.occurred_at)\n" +
+    "GROUP BY 1, 2 ORDER BY attempts DESC LIMIT 20" }], { w: 8 });
   b.table("Failed sign-ins by client IP", [{ ds: L, expr: `sum by (client_ip, outcome) (count_over_time(${act} | event="auth.signin" | outcome=~"denied|failure" [$__range]))` }], { w: 8, sortBy: "Last *" });
-  b.table("Admin actions", [{ ds: L, expr: `sum by (event, outcome, user_id) (count_over_time(${act} | event=~"admin\\\\..*" [$__range]))` }], { w: 8, sortBy: "Last *" });
+
+  b.row("Audit trail (PostgreSQL, AUDIT_RETENTION_DAYS) — sign-in, account, admin, reference data");
+  b.table("Audit events (filtered by the selected user, as actor or target)", [{ ds: PG, sql:
+    "SELECT a.occurred_at AS time, a.event, a.outcome, u.email AS \"user\", t.email AS target, o.name AS organization,\n" +
+    "       a.client_ip, a.reason, a.trace_id\n" +
+    "FROM audit_events a\n" +
+    "LEFT JOIN users u ON u.id = a.user_id\n" +
+    "LEFT JOIN users t ON t.id = a.target_user_id\n" +
+    "LEFT JOIN organizations o ON o.id = a.organization_id\n" +
+    "WHERE $__timeFilter(a.occurred_at)\n" +
+    "  AND (${user_id:sqlstring} = '.*' OR a.user_id::text = ${user_id:sqlstring} OR a.target_user_id::text = ${user_id:sqlstring})\n" +
+    "ORDER BY a.occurred_at DESC LIMIT 500" }], { w: 24, h: 10 });
+  b.table("Users", [{ ds: PG, sql:
+    "SELECT u.email, u.id, u.role, u.is_active AS active, o.name AS organization\n" +
+    "FROM users u LEFT JOIN organizations o ON o.id = u.organization_id ORDER BY u.email" }], { w: 24, h: 8 });
 
   b.row("Journey of one user");
-  b.logs("Events (set User id; open a line for View trace)", `${act} | user_id=~"$user_id" | event=~"$event" | line_format "{{.event}}  {{.outcome}}  {{if .sheet_id}}sheet={{.sheet_id}} {{end}}{{if .workbook_id}}workbook={{.workbook_id}} {{end}}{{if .code}}code={{.code}} {{end}}user={{.user_id}}"`, { h: 16 });
+  b.logs("Events of the selected user (open a line for View trace)", `${act} | user_id=~"$user_id" | event=~"$event" | line_format "{{.event}}  {{.outcome}}  {{if .sheet_id}}sheet={{.sheet_id}} {{end}}{{if .workbook_id}}workbook={{.workbook_id}} {{end}}{{if .code}}code={{.code}} {{end}}user={{.user_id}}"`, { h: 16 });
   out["voyage-user-activity"] = dash("voyage-user-activity", "Voyage — User activity", b, [
-    textbox("user_id", "User id (regex, .* = all)", ".*"),
+    { name: "user_id", label: "User", type: "query", datasource: PG,
+      query: "SELECT email AS __text, id::text AS __value FROM users ORDER BY email",
+      definition: "SELECT email AS __text, id::text AS __value FROM users ORDER BY email",
+      includeAll: true, multi: false, allValue: ".*", current: { text: "All", value: "$__all" }, refresh: 1 },
     textbox("event", "Event (regex)", ".*"),
   ]);
 }

@@ -30,20 +30,22 @@
     "list": [
       {
         "name": "user_id",
-        "label": "User id (regex, .* = all)",
-        "type": "textbox",
-        "query": ".*",
-        "current": {
-          "text": ".*",
-          "value": ".*"
+        "label": "User",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "postgres"
         },
-        "options": [
-          {
-            "text": ".*",
-            "value": ".*",
-            "selected": true
-          }
-        ]
+        "query": "SELECT email AS __text, id::text AS __value FROM users ORDER BY email",
+        "definition": "SELECT email AS __text, id::text AS __value FROM users ORDER BY email",
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 1
       },
       {
         "name": "event",
@@ -570,7 +572,7 @@
         }
       ],
       "type": "table",
-      "title": "Most active users (events in range)",
+      "title": "Most active users (events in range; pick one above to see their journey)",
       "options": {
         "showHeader": true,
         "cellHeight": "sm",
@@ -609,6 +611,50 @@
         "h": 9,
         "w": 8,
         "x": 8,
+        "y": 14
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "postgres"
+          },
+          "rawSql": "SELECT COALESCE(u.email, 'unknown email #' || left(a.email_hash, 8)) AS account, a.reason, count(*) AS attempts, max(a.occurred_at) AS last_attempt\nFROM audit_events a LEFT JOIN users u ON u.id = a.target_user_id\nWHERE a.event = 'auth.signin' AND a.outcome IN ('denied', 'failure') AND $__timeFilter(a.occurred_at)\nGROUP BY 1, 2 ORDER BY attempts DESC LIMIT 20",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "type": "table",
+      "title": "Failed sign-ins by account (audit trail)",
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "transformations": []
+    },
+    {
+      "id": 13,
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
         "y": 14
       },
       "datasource": {
@@ -662,67 +708,9 @@
       ]
     },
     {
-      "id": 13,
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 16,
-        "y": 14
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "expr": "sum by (event, outcome, user_id) (count_over_time({log_type=\"activity\"} | json | event=~\"admin\\\\..*\" [$__range]))",
-          "legendFormat": "",
-          "queryType": "instant"
-        }
-      ],
-      "type": "table",
-      "title": "Admin actions",
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "sortBy": [
-          {
-            "displayName": "Last *",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "reduce",
-          "options": {
-            "reducers": [
-              "lastNotNull"
-            ]
-          }
-        }
-      ]
-    },
-    {
       "id": 14,
       "type": "row",
-      "title": "Journey of one user",
+      "title": "Audit trail (PostgreSQL, AUDIT_RETENTION_DAYS) — sign-in, account, admin, reference data",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -735,10 +723,111 @@
     {
       "id": 15,
       "gridPos": {
-        "h": 16,
+        "h": 10,
         "w": 24,
         "x": 0,
         "y": 24
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "postgres"
+          },
+          "rawSql": "SELECT a.occurred_at AS time, a.event, a.outcome, u.email AS \"user\", t.email AS target, o.name AS organization,\n       a.client_ip, a.reason, a.trace_id\nFROM audit_events a\nLEFT JOIN users u ON u.id = a.user_id\nLEFT JOIN users t ON t.id = a.target_user_id\nLEFT JOIN organizations o ON o.id = a.organization_id\nWHERE $__timeFilter(a.occurred_at)\n  AND (${user_id:sqlstring} = '.*' OR a.user_id::text = ${user_id:sqlstring} OR a.target_user_id::text = ${user_id:sqlstring})\nORDER BY a.occurred_at DESC LIMIT 500",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "type": "table",
+      "title": "Audit events (filtered by the selected user, as actor or target)",
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "transformations": []
+    },
+    {
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "postgres"
+          },
+          "rawSql": "SELECT u.email, u.id, u.role, u.is_active AS active, o.name AS organization\nFROM users u LEFT JOIN organizations o ON o.id = u.organization_id ORDER BY u.email",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "type": "table",
+      "title": "Users",
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "transformations": []
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Journey of one user",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 43
       },
       "datasource": {
         "type": "loki",
@@ -757,7 +846,7 @@
         }
       ],
       "type": "logs",
-      "title": "Events (set User id; open a line for View trace)",
+      "title": "Events of the selected user (open a line for View trace)",
       "options": {
         "showTime": true,
         "wrapLogMessage": true,

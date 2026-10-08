@@ -45,6 +45,12 @@ x-app-env: &app-env
   # Calculation authority stage served to the browser (M10): local | server_display | server_only.
   # Rollback = local + restart the APIs; open pages switch on their next load.
   CALC_AUTHORITY: ${CALC_AUTHORITY:-local}
+  # Only the edge proxy (fixed address on the project network) may set the
+  # client IP through X-Forwarded-For; nobody else can spoof it.
+  TRUSTED_PROXIES: 172.30.0.10
+  # Durable audit trail (audit_events): email-hash key and retention.
+  AUDIT_HASH_KEY: ${AUDIT_HASH_KEY:-}
+  AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
   # Optional third-party integrations (features using them are unavailable when empty).
   EXCHANGERATE_API_KEY: ${EXCHANGERATE_API_KEY:-}
   FLEETGO_API_KEY: ${FLEETGO_API_KEY:-}
@@ -179,7 +185,9 @@ services:
 
   loki:
     image: grafana/loki:3.5.1
-    command: ["-config.file=/etc/loki/loki.yaml"]
+    command: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+    environment:
+      LOKI_RETENTION: ${LOKI_RETENTION:-720h}   # 30 days
     volumes:
       - ./deploy/observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
       - loki_data:/loki
@@ -216,6 +224,8 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceToMetrics
+      # Read-only database user for the PostgreSQL data source (user directory, audit trail).
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?set GRAFANA_DB_PASSWORD}
     volumes:
       - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -247,6 +257,8 @@ services:
       <<: *app-env
       ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      # Creates/rotates the read-only grafana_reader database role.
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?set GRAFANA_DB_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -313,7 +325,12 @@ services:
   # ---------- edge ----------
   edge:
     image: nginx:1.27.5-alpine
-    volumes: ["./deploy/edge/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    volumes:
+      - ./deploy/edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/edge/real-ip.conf:/etc/nginx/real-ip.conf:ro
+    networks:
+      default:
+        ipv4_address: 172.30.0.10   # = TRUSTED_PROXIES of the API
     ports: ["127.0.0.1:${EDGE_PORT:-8080}:8080"]
     depends_on:
       web:
@@ -328,6 +345,13 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24   # fixed so the edge has a known address
+          ip_range: 172.30.0.128/25 # dynamic addresses; .1-.127 stay free for fixed ones (edge = .10)
 
 volumes:
   pg_data:
