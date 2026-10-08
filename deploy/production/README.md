@@ -35,5 +35,10 @@ host. For production, keep the same pipeline and these settings:
 - Collect logs with the platform's agent instead of mounting the Docker socket. Use Alloy as a DaemonSet on
   Kubernetes, or the cloud's log driver. Keep the `service` and `level` labels and `trace_id` as structured metadata,
   so the Grafana links keep working.
+- Client IP: the API trusts only the edge (`TRUSTED_PROXIES`). With a load balancer in front, configure
+  `deploy/edge/real-ip.conf` (`set_real_ip_from` = the load balancer's range), or every user shares the balancer's IP
+  in rate limits and the audit trail. Never trust `0.0.0.0/0`.
+- Retention: `LOKI_RETENTION` (logs) and `AUDIT_RETENTION_DAYS` (PostgreSQL audit trail). Back up `audit_events`
+  with the database.
 - Put Grafana behind SSO and TLS, with the admin password in the secrets manager. Provision the same data sources and
   dashboard from `deploy/observability/grafana/`.

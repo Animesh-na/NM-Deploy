@@ -49,6 +49,9 @@ Fill in the required secrets in `.env`:
 - `MFA_ENCRYPTION_KEY`: 64 hex characters, e.g. `openssl rand -hex 32`
 - `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account
 - `GRAFANA_ADMIN_PASSWORD`: password of the Grafana `admin` user
+- `GRAFANA_DB_PASSWORD`: password of the read-only database user Grafana uses for the user directory and audit trail
+- optional: `AUDIT_HASH_KEY` (keys the email fingerprints on sign-in events), `AUDIT_RETENTION_DAYS` (default 365),
+  `LOKI_RETENTION` (default 720h, i.e. 30 days)
 
 `.env` is gitignored. Never commit it.
 
@@ -73,7 +76,7 @@ In Grafana, open **Dashboards → Voyage Platform**:
 | Voyage — Overview (metrics) | Watch calculation, WebSocket, save, worker, database and HTTP health |
 | Voyage — Backend logs | Find API/worker errors, failing or slow routes, failed or slow SQL, panics |
 | Voyage — Frontend logs | Find browser errors and the API calls browsers saw fail (each links to its backend trace) |
-| Voyage — User activity | See sign-ins, sheets opened, calculations, saves, admin actions; one user's journey |
+| Voyage — User activity | Pick a user by email: their journey; sign-ins and failures per account, audit trail (365 days), admin actions |
 | Voyage — Request journey | Paste a trace id or request id: every log line, SQL statement and span of that request |
 
 **Explore** runs ad-hoc LogQL, PromQL and TraceQL queries. Logs are labelled `source` (backend / frontend /

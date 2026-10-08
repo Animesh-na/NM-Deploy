@@ -82,13 +82,13 @@ flowchart LR
 | `api-1`, `api-2` | horizontally | **none between requests** | REST API, calculation WebSocket, session manager, Go calculation engine |
 | `worker` | horizontally (idempotent) | none | Applies queued saves to PostgreSQL |
 | `migrate` | once per deploy | none | Schema migrations (AutoMigrate + versioned SQL) and admin seed |
-| `postgres` | 1 | **durable** | Sheets, workbooks, users, organizations, calculation snapshots, frontend logs |
+| `postgres` | 1 | **durable** | Sheets, workbooks, users, organizations, calculation snapshots, frontend logs, audit trail |
 | `redis` | 1 (single shard, D-031) | ephemeral | Sessions, leases, fence counters, tickets, rate limits, save outcomes, lookup cache |
 | `rabbitmq` | 1 | durable queue | Save messages only (never UI traffic) |
 | `otel-collector` | 1 | none | Receives OTLP; traces → Tempo, metrics → Prometheus; drops background Redis noise |
-| `prometheus`, `loki`, `tempo` | 1 each | 15 d / 7 d / 7 d | Metrics, logs, traces |
+| `prometheus`, `loki`, `tempo` | 1 each | 15 d / 30 d / 7 d | Metrics, logs, traces |
 | `alloy` | 1 | none | Ships every container's logs to Loki with `source` / `log_type` labels |
-| `grafana` | 1 | provisioned | One UI for metrics, logs and traces; five dashboards |
+| `grafana` | 1 | provisioned | One UI for metrics, logs, traces and the audit trail; five dashboards |
 
 One Go module builds two processes, the **API** and the **worker** (a modular monolith, D-039). The frontend is a
 static build. All published ports bind to `127.0.0.1`.
@@ -306,6 +306,7 @@ erDiagram
   dry_bulk_sheets ||--o{ calculation_snapshots : "sheet_id + segment"
   tanker_sheets ||--o{ calculation_snapshots : "sheet_id + segment"
   users ||--o{ frontend_logs : reports
+  users ||--o{ audit_events : "actor / target"
 
   dry_bulk_sheets {
     uuid id PK
@@ -328,6 +329,18 @@ erDiagram
     text status
     text idempotency_key UK "save idempotency ledger"
   }
+  audit_events {
+    bigint id PK
+    timestamptz occurred_at
+    text event "auth.* account.* admin.* reference.*"
+    text outcome
+    uuid user_id "actor"
+    uuid target_user_id
+    text email_hash "keyed HMAC, never the email"
+    text client_ip
+    text reason
+    text trace_id
+  }
   frontend_logs {
     uuid id PK
     varchar level
@@ -342,6 +355,8 @@ erDiagram
   never make a save fail.
 - `calculation_snapshots` is also the save idempotency ledger. Never delete its rows.
 - `frontend_logs` backs the admin log viewer. The same events also reach Loki (§7).
+- `audit_events` is the durable trail of security-relevant activity (§7). It is kept `AUDIT_RETENTION_DAYS`
+  (default 365) and pruned daily.
 
 ---
 
@@ -380,7 +395,7 @@ event is a log line plus the `user_activity{event,outcome}` metric.
 
 | Area | Events |
 |---|---|
-| Authentication | `auth.signin` (`success`, `mfa_required`, `denied`), `auth.mfa_verify`, `auth.mfa_resend` |
+| Authentication | `auth.signin` (`success`, `mfa_required`, `denied`), `auth.mfa_verify`, `auth.mfa_resend`, `auth.logout` |
 | Account | `account.mfa_setup`, `account.mfa_enable`, `account.mfa_disable` |
 | Sheets, workbooks | `sheet.open`, `sheet.save`, `sheet.archive`, `sheet.restore`, `workbook.create` / `.open` / `.update` / `.archive` / `.restore` |
 | Calculation session | `session.open`, `session.resume`, `calculation.run`, `sheet.save` (`via=websocket`), `session.conflict`, `session.error`, `session.close` |
@@ -388,6 +403,20 @@ event is a log line plus the `user_activity{event,outcome}` metric.
 | Administration | `admin.user.*`, `admin.organization.*`, `admin.sheets.view`, `admin.cache_clear` |
 
 Outcomes: `success`, `failure` (4xx), `denied` (401/403), `conflict`, `error`, `mfa_required`.
+
+What makes a user's activity complete and attributable:
+
+| Question | How it's answered |
+|---|---|
+| Who did it? | `user_id` on every event, access line and signed-in browser line. Grafana shows the **email**, resolved at view time through the read-only `grafana_reader` database role. Logs themselves carry ids only. |
+| Who tried to sign in and failed? | Refused `auth.signin` carries `reason` (`unknown_email`, `account_inactive`, `wrong_password`). When the account exists it also carries `target_user_id`. Every sign-in carries `email_hash`, a keyed HMAC, so repeated attempts on one address can be counted without storing it. The client always gets the same generic error. |
+| When did the session end? | `auth.logout` (explicit, `POST /api/v1/auth/logout`), `session.close` (editor closed, with duration), or token expiry (no event: JWTs expire silently). |
+| From where? | `client_ip` on authentication events: the address the edge proxy saw. Only the edge (`TRUSTED_PROXIES`) may forward it, so `X-Forwarded-For` from a client is ignored. |
+| Which request, SQL, trace? | `trace_id` on events. Live-session saves link to the save's trace, `session.close` to the session's open. |
+| For how long? | Loki keeps everything for 30 days (`LOKI_RETENTION`). Authentication, account, admin and reference-data events are also in PostgreSQL `audit_events` for 365 days (`AUDIT_RETENTION_DAYS`). |
+
+Browser events recorded before sign-in are uploaded as `anonymous` and stored without a user. A user's pending
+browser events are sent with their own token when they sign out, never under the next user's.
 
 The browser adds UI-only events that the server can't see, such as exports, view changes, imports and regulatory
 toggles (`trackEvent`). These arrive as `log_type=frontend` lines with `kind=activity`.
@@ -427,7 +456,7 @@ flowchart LR
   - Each replica has its own `instance` label (`OTEL_RESOURCE_ATTRIBUTES=service.instance.id=…`).
 - **Traces** (Tempo, 7 d): browser `traceparent` → HTTP or WebSocket span → calculation → RabbitMQ → worker →
   PostgreSQL. Successful background Redis calls with no parent span are dropped at the collector; failed ones are kept.
-- **Logs** (Loki, 7 d): see §7.
+- **Logs** (Loki, 30 d): see §7. Audit trail in PostgreSQL, 365 d.
 
 Grafana dashboards (folder **Voyage Platform**; generated by `deploy/observability/grafana/gen-dashboards.cjs`):
 
@@ -436,7 +465,7 @@ Grafana dashboards (folder **Voyage Platform**; generated by `deploy/observabili
 | **Overview (metrics)** | Calculation rate and latency, WebSockets and sessions, saves and conflicts, worker and RabbitMQ, PostgreSQL and Redis latency, HTTP routes, service graph, error and slow traces |
 | **Backend logs** | Errors, warnings, 5xx, slow requests, failed SQL, panics; volume by log type; failing and slowest routes; slow/failed SQL statements; a filterable stream (service, log type, level, text) |
 | **Frontend logs** | Browser errors, failed API calls seen by browsers (linked to backend traces), sessions, UI events by action, top errors, stream |
-| **User activity** | Active users, sign-ins and failures, sheets opened, calculations, saves; events and unsuccessful outcomes over time; most active users; failed sign-ins by IP; admin actions; one user's journey |
+| **User activity** | Pick a user **by email**: their event journey. Also: active users, sign-ins and failures, sheets opened, calculations, saves; events and unsuccessful outcomes over time; most active users; failed sign-ins by account and by IP; the audit trail (PostgreSQL, 365 days); the user directory |
 | **Request journey** | Paste a trace id or request id: the access line, every backend and browser log line of the trace, its SQL statements (`db.query.text`, rows), and the full trace |
 
 Links between signals:
@@ -508,9 +537,13 @@ Every row is covered by automated tests; the test-by-test list is in
 - **What telemetry never contains:**
   - sheet contents or bound SQL values (filtered for logged statements and for `.Scan()` statements; D-062);
   - credentials or tickets (query values redacted);
-  - emails (ids only);
+  - emails (ids only; failed sign-ins carry a keyed HMAC of the address);
   - panic argument values.
-  - The client IP is recorded only on authentication events (security audit, D-061).
+  - The client IP is recorded only on authentication events (security audit, D-061). It can't be spoofed: only the edge
+    proxy may forward it (`TRUSTED_PROXIES`, D-064).
+- **Grafana's database access** uses `grafana_reader`, which may read only `users(id, email, role, is_active,
+  organization_id)`, `organizations(id, name)` and `audit_events`. It is read-only, with a 10 s statement timeout.
+  Password hashes, MFA secrets, sheets and logs are not readable.
 - **Network:** every published port binds to `127.0.0.1`. Alloy reads the Docker socket read-only; in production use
   the platform's log agent.
 - **Containers** run as non-root (API/worker uid 10001, web uid 101).
@@ -546,6 +579,7 @@ Settings reference: [NM-backend/docs/DEPLOYMENT.md](../NM-backend/docs/DEPLOYMEN
 | Fresh databases lack `tanker_sheets` and the read-only import tables | Created only by the manual SQL in `NM-backend/migrations/`; AutoMigrate does not create them |
 | Sheet list endpoints return full `data` | Works; heavier as sheets grow (API change, pending decision) |
 | `calculation_snapshots` keeps a full copy per save | Payload retention pending decision |
-| Activity and log retention | 7 days in Loki; longer audit retention would need a decision (PostgreSQL keeps frontend logs) |
+| Client IP on Docker Desktop | All browser traffic arrives from Docker's port-forwarding address. A Linux host sees real client IPs; behind a load balancer, set `deploy/edge/real-ip.conf` |
+| Token expiry | Not an event: a JWT that simply expires is not observed server-side (explicit logouts are) |
 | Sea-route service (`SEAROUTE_SERVICE_URL`) | External, not part of the stack |
 | Unused functions in `internal/voyagecalc` (3) | Kept: engine changes need a parity review |

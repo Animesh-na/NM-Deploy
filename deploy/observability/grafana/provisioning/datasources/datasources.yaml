@@ -64,3 +64,22 @@ datasources:
         datasourceUid: loki
       streamingEnabled:
         search: true
+
+  # Read-only user directory and audit trail. The grafana_reader role can read
+  # users(id, email, role, is_active, organization_id), organizations(id, name)
+  # and audit_events only (created by the migrate job, D-064). Logs carry ids;
+  # emails are resolved here, at view time.
+  - name: Users and audit (PostgreSQL)
+    uid: postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_reader
+    jsonData:
+      database: mcs_db
+      sslmode: disable
+      postgresVersion: 1600
+      maxOpenConns: 5
+      maxIdleConns: 2
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD
