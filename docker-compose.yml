@@ -224,6 +224,9 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceToMetrics
+      # Public URL when Grafana is served behind a domain (links, redirects); secure cookies over HTTPS.
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
+      GF_SECURITY_COOKIE_SECURE: ${GRAFANA_COOKIE_SECURE:-false}
       # Read-only database user for the PostgreSQL data source (user directory, audit trail).
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?set GRAFANA_DB_PASSWORD}
     volumes:
